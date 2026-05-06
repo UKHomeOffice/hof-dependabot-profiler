@@ -87,7 +87,6 @@ function createEmptyStats() {
     high: 0,
     medium: 0,
     low: 0,
-    unknown: 0,
     total: 0,
     riskScore: 0
   };
@@ -186,11 +185,10 @@ function aggregate(allAlerts, repos = []) {
   }
 
   for (const alert of allAlerts) {
-    const repo = alert._sourceRepo || alert.repository?.full_name || "unknown";
+    const repo = alert._sourceRepo || alert.repository?.full_name;
     const severity =
       alert.security_advisory?.severity ||
-      alert.security_vulnerability?.severity ||
-      "unknown";
+      alert.security_vulnerability?.severity
 
     if (!result[repo]) {
       result[repo] = createEmptyStats();
@@ -216,10 +214,6 @@ function aggregate(allAlerts, repos = []) {
   }
 
   return result;
-}
-
-function pad(value, width) {
-  return String(value).padStart(width, " ");
 }
 
 function chunkLines(lines, maxLength) {
@@ -248,34 +242,76 @@ function chunkLines(lines, maxLength) {
   return chunks;
 }
 
+function buildDependabotAlertsUrl(repo) {
+  return `https://github.com/${repo}/security/dependabot`;
+}
+
+function summarizeSeverities(summary) {
+  return summary.reduce((totals, entry) => {
+    totals.critical += entry.critical;
+    totals.high += entry.high;
+    totals.medium += entry.medium;
+    totals.low += entry.low;
+    return totals;
+  }, {
+    critical: 0,
+    high: 0,
+    medium: 0,
+    low: 0
+  });
+}
+
+function buildRepoLine(entry) {
+    const repoLink = `<${buildDependabotAlertsUrl(entry.repo)}|${entry.repo}>`;
+
+    return `• *${repoLink}* — ${entry.total} open (*${entry.critical}C/${entry.high}H/${entry.medium}M/${entry.low}L*), *risk ${entry.riskScore}*`;
+}
+
+function buildRiskGroups(summary) {
+  // Categorisation:
+  // Critical: riskScore >= 100 OR at least 1 critical
+  // High: riskScore >= 20 && < 100, no criticals
+  // Medium: riskScore >= 5 && < 20, no criticals
+  // Low: riskScore < 5, no criticals
+  const critical = summary.filter((entry) => entry.critical > 0 || entry.riskScore >= 100);
+  const high = summary.filter((entry) => entry.critical === 0 && entry.riskScore >= 20 && entry.riskScore < 100);
+  const medium = summary.filter((entry) => entry.critical === 0 && entry.riskScore >= 5 && entry.riskScore < 20);
+  const low = summary.filter((entry) => entry.critical === 0 && entry.riskScore < 5);
+
+  const groups = [];
+  if (critical.length > 0) {
+    groups.push({ title: "🚨 Critical Risk Repos", repos: critical });
+  }
+  if (high.length > 0) {
+    groups.push({ title: "⚠️ High Risk Repos", repos: high });
+  }
+  if (medium.length > 0) {
+    groups.push({ title: "⚠️ Medium Risk Repos", repos: medium });
+  }
+  if (low.length > 0) {
+    groups.push({ title: "ℹ️ Low Risk Repos", repos: low });
+  }
+  return groups;
+}
+
 function buildSlackPayload(summary, totalAlerts, zeroAlertRepoCount, zeroAlertRepoNames = []) {
-  const header = [
-    "repo".padEnd(42, " "),
-    "total",
-    "crit",
-    "high",
-    "med",
-    "low",
-    "risk"
-  ].join(" ");
+  const severityTotals = summarizeSeverities(summary);
+  const riskGroups = buildRiskGroups(summary);
+  const zeroAlertLines = zeroAlertRepoNames.map((repo) => `\* ${repo}`);
 
-  const rows = summary.map((entry) => [
-    entry.repo.padEnd(42, " "),
-    pad(entry.total, 5),
-    pad(entry.critical, 4),
-    pad(entry.high, 4),
-    pad(entry.medium, 3),
-    pad(entry.low, 3),
-    pad(entry.riskScore, 4)
-  ].join(" "));
+  // Calculate percentages
+  const pct = (count) => totalAlerts > 0 ? Math.round((count / totalAlerts) * 100) : 0;
+  const criticalPct = pct(severityTotals.critical);
+  const highPct = pct(severityTotals.high);
+  const mediumPct = pct(severityTotals.medium);
+  const lowPct = pct(severityTotals.low);
 
-  const tableChunks = chunkLines([header, ...rows], 2800);
   const blocks = [
     {
       type: "header",
       text: {
         type: "plain_text",
-        text: "Dependabot Open Alert Summary"
+        text: "🚨 Dependabot Open Alert Summary 🚨"
       }
     },
     {
@@ -285,16 +321,32 @@ function buildSlackPayload(summary, totalAlerts, zeroAlertRepoCount, zeroAlertRe
         text: [
           `*Repos checked:* ${summary.length + zeroAlertRepoCount}`,
           `*Repos with alerts:* ${summary.length}`,
-          zeroAlertRepoCount > 0
-            ? `*Repos with zero alerts:* ${zeroAlertRepoCount} (${zeroAlertRepoNames.join(", ")})`
-            : `*Repos with zero alerts:* 0`,
-          `*Open alerts:* ${totalAlerts}`
+          `*Open alerts:* ${totalAlerts}`,
+          `*Severity mix: ${severityTotals.critical} critical (${criticalPct}%), ${severityTotals.high} high (${highPct}%), ${severityTotals.medium} medium (${mediumPct}%), ${severityTotals.low} low (${lowPct}%)*`
         ].join("\n")
       }
     }
   ];
 
-  if (tableChunks.length === 1 && rows.length === 0) {
+  if (zeroAlertRepoCount > 0) {
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: [`*✅ Repos with zero alerts:* ${zeroAlertRepoCount}`, ...zeroAlertLines].join("\n")
+      }
+    });
+  } else {
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: "*Repos with zero alerts:* 0"
+      }
+    });
+  }
+
+  if (summary.length === 0) {
     blocks.push({
       type: "section",
       text: {
@@ -303,14 +355,27 @@ function buildSlackPayload(summary, totalAlerts, zeroAlertRepoCount, zeroAlertRe
       }
     });
   } else {
-    for (const chunk of tableChunks) {
+    for (const group of riskGroups) {
+      const groupLines = group.repos.map(buildRepoLine);
+      const groupChunks = chunkLines(groupLines, 2800);
+
       blocks.push({
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `\`\`\`${chunk}\`\`\``
+          text: `*${group.title}:* ${group.repos.length}`
         }
       });
+
+      for (const chunk of groupChunks) {
+        blocks.push({
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: chunk
+          }
+        });
+      }
     }
   }
 
@@ -325,6 +390,11 @@ async function outputResults(outputMode, summary, totalAlerts, zeroAlertRepoCoun
     console.log("\n=== Sorted Risk Summary ===\n");
     console.table(summary);
     console.log(`Repos with zero alerts: ${zeroAlertRepoCount}`);
+
+    for (const repo of zeroAlertRepoNames) {
+      console.log(` * ${repo}`);
+    }
+
     return;
   }
 

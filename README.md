@@ -14,6 +14,8 @@ Fetch and summarize open Dependabot alerts across multiple GitHub repositories, 
   - Direct Slack posting via webhook
 - Reports all repos, including those with zero alerts (clean repos)
 - Slack output lists clean repo names for easy visibility
+- Slack output includes severity mix with both counts and percentages (e.g. `24 critical (2%), 408 high (40%)`)
+- Only the four GitHub-supported severities are shown: critical, high, medium, low
 - Concurrency-limited for efficient API usage
 - GitHub Actions workflow for scheduled and manual CI runs
 
@@ -99,3 +101,8 @@ jobs:
 
 - Only repos with open alerts are shown in the table
 - Names of all repos with zero alerts are listed in the header
+- Severity mix in the summary includes both the count and percentage of each severity:
+
+  > Severity mix: 24 critical (2%), 408 high (40%), 434 medium (43%), 154 low (15%)
+
+- Only the four GitHub-supported severities are included (critical, high, medium, low)
