@@ -7,22 +7,16 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-
     - name: Set up Node.js
       uses: actions/setup-node@v4
       with:
         node-version: 24
 
     - name: Run dependabot profiler
-      env:
-        GITHUB_TOKEN: ${{ secrets.DEPENDABOT_PAT }}
       run: |
         set -euo pipefail
-        node hof-dependabot-profiler/index.js --output=slack-json > slack-payload.json
+        node index.js --output=slack-json > slack-payload.json
+      shell: bash
 
     - name: Notify Slack
       env:
@@ -30,3 +24,4 @@ runs:
       run: |
         set -euo pipefail
         curl -X POST -H 'Content-type: application/json' --data "@slack-payload.json" "$SLACK_WEBHOOK_URL"
+      shell: bash
