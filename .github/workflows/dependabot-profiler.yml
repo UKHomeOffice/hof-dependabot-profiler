@@ -1,0 +1,17 @@
+name: Daily Dependabot Profiler
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # Every day at 08:00 UTC
+  workflow_dispatch:      # (optional) allows manual runs
+
+jobs:
+  profile-dependabot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Use composite action
+        uses: ./.github/actions/action.yml
+        with:
+          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.DEPENDABOT_PAT }}
