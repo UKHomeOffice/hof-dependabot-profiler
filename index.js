@@ -292,6 +292,26 @@ function getAlertGroupKey(alert) {
   return `FALLBACK:${summary}`;
 }
 
+function getAlertSeverity(alert) {
+  return (
+    alert.security_advisory?.severity ||
+    alert.security_vulnerability?.severity ||
+    "unknown"
+  );
+}
+
+function getHigherSeverity(left, right) {
+  const severityRank = {
+    critical: 4,
+    high: 3,
+    medium: 2,
+    low: 1,
+    unknown: 0
+  };
+
+  return (severityRank[left] || 0) >= (severityRank[right] || 0) ? left : right;
+}
+
 function buildDuplicateStats(allAlerts) {
   const groups = new Map();
 
@@ -304,6 +324,7 @@ function buildDuplicateStats(allAlerts) {
     const pkg = alert.security_vulnerability?.package || {};
     const vulnerable_version_range = alert.security_vulnerability?.vulnerable_version_range || null;
     const first_patched_version = alert.security_vulnerability?.first_patched_version?.identifier || null;
+    const severity = getAlertSeverity(alert);
 
     if (!groups.has(key)) {
       groups.set(key, {
@@ -311,6 +332,7 @@ function buildDuplicateStats(allAlerts) {
         cveId: advisory.cve_id || null,
         ghsaId: advisory.ghsa_id || null,
         aliases: getAdvisoryAliases(advisory),
+        severity,
         summary: advisory.summary || advisory.description || "No summary",
         alertCount: 0,
         repos: new Set(),
@@ -321,6 +343,7 @@ function buildDuplicateStats(allAlerts) {
     }
 
     const group = groups.get(key);
+  group.severity = getHigherSeverity(group.severity, severity);
     group.alertCount += 1;
     group.repos.add(repo);
     if (pkg.name) group.packageNames.add(pkg.name);
@@ -385,6 +408,7 @@ function buildDuplicateLine(group) {
     group.aliases[0] ||
     group.key;
   const summary = (group.summary || "No summary").replace(/\s+/g, " ").trim();
+  const severity = group.severity || "unknown";
   const pkg = group.packageNames.length > 0 ? group.packageNames.join(", ") : "-";
   const vulnRange = group.vulnerableVersionRanges.length > 0 ? group.vulnerableVersionRanges.join(", ") : "-";
   const patched = group.patchedVersions.length > 0 ? group.patchedVersions.join(", ") : null;
@@ -415,6 +439,7 @@ function buildDuplicateLine(group) {
   }
 
   let out = `*${identifier}* - ${group.alertCount} alerts across ${group.repoCount} repos\n`;
+  out += `  - *Severity*: ${severity}\n`;
   out += `  - *Summary*: ${summary}\n`;
   out += `  - *Reference*: ${referenceUrl}\n`;
   out += `  - *Affected package*: ${pkg} (${vulnRange})\n`;
