@@ -246,6 +246,97 @@ function buildDependabotAlertsUrl(repo) {
   return `https://github.com/${repo}/security/dependabot`;
 }
 
+function getAdvisoryAliases(advisory = {}) {
+  const aliases = Array.isArray(advisory?.identifiers) ? advisory.identifiers : [];
+  return aliases
+    .map((id) => id?.value)
+    .filter(Boolean);
+}
+
+function getAlertGroupKey(alert) {
+  const advisory = alert.security_advisory || {};
+  const cveId = advisory.cve_id;
+  if (cveId) return `CVE:${cveId}`;
+
+  const ghsa = advisory.ghsa_id;
+  if (ghsa) return `GHSA:${ghsa}`;
+
+  const aliases = getAdvisoryAliases(advisory);
+  const cve = aliases.find((value) => value.startsWith("CVE-"));
+  if (cve) return `CVE:${cve}`;
+
+  if (aliases.length > 0) {
+    return `ALIAS:${aliases[0]}`;
+  }
+
+  const summary = advisory.summary || advisory.description || "unknown-advisory";
+  return `FALLBACK:${summary}`;
+}
+
+function buildDuplicateStats(allAlerts) {
+  const groups = new Map();
+
+  for (const alert of allAlerts) {
+    const repo = alert._sourceRepo || alert.repository?.full_name;
+    if (!repo) continue;
+
+    const key = getAlertGroupKey(alert);
+    const advisory = alert.security_advisory || {};
+    const pkg = alert.security_vulnerability?.package || {};
+    const vulnerable_version_range = alert.security_vulnerability?.vulnerable_version_range || null;
+    const first_patched_version = alert.security_vulnerability?.first_patched_version?.identifier || null;
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        cveId: advisory.cve_id || null,
+        ghsaId: advisory.ghsa_id || null,
+        aliases: getAdvisoryAliases(advisory),
+        summary: advisory.summary || advisory.description || "No summary",
+        alertCount: 0,
+        repos: new Set(),
+        packageNames: new Set(),
+        vulnerableVersionRanges: new Set(),
+        patchedVersions: new Set()
+      });
+    }
+
+    const group = groups.get(key);
+    group.alertCount += 1;
+    group.repos.add(repo);
+    if (pkg.name) group.packageNames.add(pkg.name);
+    if (vulnerable_version_range) group.vulnerableVersionRanges.add(vulnerable_version_range);
+    if (first_patched_version) group.patchedVersions.add(first_patched_version);
+  }
+
+  const grouped = Array.from(groups.values()).map((group) => ({
+    ...group,
+    repoCount: group.repos.size,
+    repos: Array.from(group.repos).sort((a, b) => a.localeCompare(b)),
+    packageNames: Array.from(group.packageNames).sort(),
+    vulnerableVersionRanges: Array.from(group.vulnerableVersionRanges).sort(),
+    patchedVersions: Array.from(group.patchedVersions).sort()
+  }));
+
+  grouped.sort((a, b) => {
+    if (b.repoCount !== a.repoCount) return b.repoCount - a.repoCount;
+    if (b.alertCount !== a.alertCount) return b.alertCount - a.alertCount;
+    return a.key.localeCompare(b.key);
+  });
+
+  const uniqueIssues = grouped.length;
+  const duplicateAlerts = Math.max(0, allAlerts.length - uniqueIssues);
+  const crossRepoIssues = grouped.filter((group) => group.repoCount > 1).length;
+
+  return {
+    uniqueIssues,
+    duplicateAlerts,
+    crossRepoIssues,
+    grouped,
+    topRepeated: grouped.filter((group) => group.alertCount > 1).slice(0, 10)
+  };
+}
+
 function summarizeSeverities(summary) {
   return summary.reduce((totals, entry) => {
     totals.critical += entry.critical;
@@ -265,6 +356,53 @@ function buildRepoLine(entry) {
     const repoLink = `<${buildDependabotAlertsUrl(entry.repo)}|${entry.repo}>`;
 
     return `• *${repoLink}* — ${entry.total} open (*${entry.critical}C/${entry.high}H/${entry.medium}M/${entry.low}L*), *risk ${entry.riskScore}*`;
+}
+
+function buildDuplicateLine(group) {
+  const identifier =
+    group.cveId ||
+    group.aliases.find((value) => value.startsWith("CVE-")) ||
+    group.ghsaId ||
+    group.aliases[0] ||
+    group.key;
+  const summary = (group.summary || "No summary").replace(/\s+/g, " ").trim();
+  const pkg = group.packageNames.length > 0 ? group.packageNames.join(", ") : "-";
+  const vulnRange = group.vulnerableVersionRanges.length > 0 ? group.vulnerableVersionRanges.join(", ") : "-";
+  const patched = group.patchedVersions.length > 0 ? group.patchedVersions.join(", ") : null;
+
+  // Find NIST reference or fallback to GitHub advisory
+  let referenceUrl = null;
+  if (group.cveId) {
+    referenceUrl = `https://nvd.nist.gov/vuln/detail/${group.cveId}`;
+  }
+  if (!referenceUrl && group.ghsaId) {
+    referenceUrl = `https://github.com/advisories/${group.ghsaId}`;
+  }
+  // fallback: try aliases for CVE or GHSA
+  if (!referenceUrl && group.aliases && Array.isArray(group.aliases)) {
+    const cveAlias = group.aliases.find((id) => id.startsWith("CVE-"));
+    if (cveAlias) {
+      referenceUrl = `https://nvd.nist.gov/vuln/detail/${cveAlias}`;
+    } else {
+      const ghsaAlias = group.aliases.find((id) => id.startsWith("GHSA-"));
+      if (ghsaAlias) {
+        referenceUrl = `https://github.com/advisories/${ghsaAlias}`;
+      }
+    }
+  }
+  // fallback: nothing found
+  if (!referenceUrl) {
+    referenceUrl = "-";
+  }
+
+  let out = `*${identifier}* - ${group.alertCount} alerts across ${group.repoCount} repos\n`;
+  out += `  - *Summary*: ${summary}\n`;
+  out += `  - *Reference*: ${referenceUrl}\n`;
+  out += `  - *Affected package*: ${pkg} (${vulnRange})\n`;
+  if (patched) {
+    out += `  - *First patched version*: ${patched}\n`;
+  }
+  return out.trim();
 }
 
 function buildRiskGroups(summary) {
@@ -294,7 +432,7 @@ function buildRiskGroups(summary) {
   return groups;
 }
 
-function buildSlackPayload(summary, totalAlerts, zeroAlertRepoCount, zeroAlertRepoNames = []) {
+function buildSlackPayload(summary, totalAlerts, zeroAlertRepoCount, zeroAlertRepoNames = [], duplicateStats) {
   const severityTotals = summarizeSeverities(summary);
   const riskGroups = buildRiskGroups(summary);
   const zeroAlertLines = zeroAlertRepoNames.map((repo) => `\* ${repo}`);
@@ -346,6 +484,44 @@ function buildSlackPayload(summary, totalAlerts, zeroAlertRepoCount, zeroAlertRe
     });
   }
 
+  if (duplicateStats) {
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: [
+          "*Duplicate insight (by GHSA/CVE across all repos):*",
+          `• Unique issues: ${duplicateStats.uniqueIssues}`,
+          `• Duplicate alerts: ${duplicateStats.duplicateAlerts}`,
+          `• Cross-repo repeated issues: ${duplicateStats.crossRepoIssues}`
+        ].join("\n")
+      }
+    });
+
+    if (duplicateStats.topRepeated.length > 0) {
+      const duplicateLines = duplicateStats.topRepeated.map(buildDuplicateLine);
+      const duplicateChunks = chunkLines(duplicateLines, 2800);
+
+      blocks.push({
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `*Top repeated issues:* ${duplicateStats.topRepeated.length}`
+        }
+      });
+
+      for (const chunk of duplicateChunks) {
+        blocks.push({
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: chunk
+          }
+        });
+      }
+    }
+  }
+
   if (summary.length === 0) {
     blocks.push({
       type: "section",
@@ -385,7 +561,7 @@ function buildSlackPayload(summary, totalAlerts, zeroAlertRepoCount, zeroAlertRe
   };
 }
 
-async function outputResults(outputMode, summary, totalAlerts, zeroAlertRepoCount, zeroAlertRepoNames) {
+async function outputResults(outputMode, summary, totalAlerts, zeroAlertRepoCount, zeroAlertRepoNames, duplicateStats) {
   if (outputMode === "console") {
     console.log("\n=== Sorted Risk Summary ===\n");
     console.table(summary);
@@ -398,7 +574,7 @@ async function outputResults(outputMode, summary, totalAlerts, zeroAlertRepoCoun
     return;
   }
 
-  const slackPayload = buildSlackPayload(summary, totalAlerts, zeroAlertRepoCount, zeroAlertRepoNames);
+  const slackPayload = buildSlackPayload(summary, totalAlerts, zeroAlertRepoCount, zeroAlertRepoNames, duplicateStats);
 
   if (outputMode === "slack-json") {
     console.log(JSON.stringify(slackPayload, null, 2));
@@ -449,6 +625,7 @@ async function main() {
   logStatus(`\nTotal open alerts fetched: ${allAlerts.length}`);
 
   const aggregated = aggregate(allAlerts, REPOS);
+  const duplicateStats = buildDuplicateStats(allAlerts);
 
   /**
    * Optional: sorted summary table
@@ -469,7 +646,14 @@ async function main() {
   const zeroAlertRepoCount = summary.length - reposWithAlerts.length;
 
   const zeroAlertRepoNames = summary.filter((entry) => entry.total === 0).map((entry) => entry.repo);
-  await outputResults(outputMode, reposWithAlerts, allAlerts.length, zeroAlertRepoCount, zeroAlertRepoNames);
+  await outputResults(
+    outputMode,
+    reposWithAlerts,
+    allAlerts.length,
+    zeroAlertRepoCount,
+    zeroAlertRepoNames,
+    duplicateStats
+  );
 }
 
 main().catch(err => {
