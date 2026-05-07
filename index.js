@@ -3,52 +3,8 @@
  */
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
-const REPOS = [
-  "UKHomeOfficeForms/hof",
-  "UKHomeOffice/additional-security-checks",
-  "UKHomeOffice/AppealRightsExhausted",
-  "UKHomeOffice/brp_enquiry_forms",
-  "UKHomeOffice/clue-resolver",
-  "UKHomeOffice/coa",
-  "UKHomeOffice/controlled-substance-licence",
-  "UKHomeOffice/ecs",
-  "UKHomeOffice/evisa-contact-form",
-  "UKHomeOffice/evisa-error-correction",
-  "UKHomeOffice/evisa-find-my-reference",
-  "UKHomeOffice/eta",
-  "UKHomeOffice/end-tenancy",
-  "UKHomeOffice/explosives-precursors-poisons",
-  "UKHomeOffice/file-vault",
-  "UKHomeOffice/firearms",
-  "UKHomeOffice/gro",
-  "UKHomeOffice/hff",
-  "UKHomeOffice/hof-forms-waf",
-  "UKHomeOffice/hof-rds-api",
-  "UKHomeOffice/hof-rds-api-lamp",
-  "UKHomeOffice/homeoffice-countries",
-  "UKHomeOffice/html-pdf-converter",
-  "UKHomeOffice/icasework-resolver",
-  "UKHomeOffice/ims-resolver",
-  "UKHomeOffice/internal-allegation-referral",
-  "UKHomeOffice/lamp",
-  "UKHomeOffice/landlords-checking-service",
-  "UKHomeOffice/lmr",
-  "UKHomeOffice/ms-schema",
-  "UKHomeOffice/modern-slavery",
-  "UKHomeOffice/paf",
-  "UKHomeOffice/refugee-integration-loan",
-  "UKHomeOffice/return-of-documents",
-  "UKHomeOffice/rotm",
-  "UKHomeOffice/save-return-api",
-  "UKHomeOffice/save-return-email-alerts",
-  "UKHomeOffice/save-return-lookup-ui",
-  "UKHomeOffice/ukvi-complaints",
-  "UKHomeOffice/visa-processing-times-tool",
-  "UKHomeOffice/web-messengers",
-  "UKHomeOffice/eta-web-messenger",
-  "UKHomeOffice/euss-web-messenger",
-  "UKHomeOffice/evisa-web-messenger",
-  "UKHomeOffice/visa-web-messenger"
+const STATIC_REPOS = [
+  "UKHomeOfficeForms/hof"
 ];
 
 // Max concurrent API calls
@@ -56,6 +12,8 @@ const CONCURRENCY = 5;
 const DEFAULT_OUTPUT_MODE = "slack-json";
 const VALID_OUTPUT_MODES = new Set(["console", "slack-json", "slack-post"]);
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
+const DEFAULT_REPO_SEARCH_QUERY = "org:UKHomeOffice topic:hof-dep-scanner";
+const REPO_SEARCH_QUERY = process.env.REPO_SEARCH_QUERY || DEFAULT_REPO_SEARCH_QUERY;
 
 if (!GITHUB_TOKEN) {
   console.error("Missing GITHUB_TOKEN");
@@ -63,6 +21,67 @@ if (!GITHUB_TOKEN) {
 }
 
 const BASE_URL = "https://api.github.com";
+
+async function fetchReposFromSearch(query) {
+  const perPage = 100;
+  let page = 1;
+  const repos = [];
+
+  while (true) {
+    const url = `${BASE_URL}/search/repositories?q=${encodeURIComponent(query)}&per_page=${perPage}&page=${page}`;
+    const res = await fetch(url, {
+      headers: {
+        "Accept": "application/vnd.github+json",
+        "Authorization": `Bearer ${GITHUB_TOKEN}`,
+        "X-GitHub-Api-Version": "2022-11-28"
+      }
+    });
+
+    if (!res.ok) {
+      throw new Error(`Repo search failed: ${res.status}`);
+    }
+
+    const data = await res.json();
+    const items = Array.isArray(data.items) ? data.items : [];
+
+    for (const item of items) {
+      if (item?.full_name) {
+        repos.push(item.full_name);
+      }
+    }
+
+    if (items.length < perPage) {
+      break;
+    }
+
+    // GitHub search API caps results at 1000.
+    if (page * perPage >= 1000) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  return Array.from(new Set(repos)).sort((a, b) => a.localeCompare(b));
+}
+
+async function resolveRepos() {
+  logStatus(`Searching repos with query: ${REPO_SEARCH_QUERY}`);
+  const searchedRepos = await fetchReposFromSearch(REPO_SEARCH_QUERY);
+
+  const mergedRepos = Array.from(new Set([...searchedRepos, ...STATIC_REPOS])).sort((a, b) => a.localeCompare(b));
+
+  if (searchedRepos.length === 0) {
+    logStatus(`Repo search returned 0 repos for query: ${REPO_SEARCH_QUERY}; using static repos only.`);
+  }
+
+  if (mergedRepos.length === 0) {
+    throw new Error("No repos available after combining search and static repo lists.");
+  }
+
+  logStatus(`Repo search returned ${searchedRepos.length} repos. Static repos: ${STATIC_REPOS.length}. Total merged repos: ${mergedRepos.length}.`);
+  return mergedRepos;
+}
 
 function getOutputMode() {
   const arg = process.argv.find((value) => value.startsWith("--output="));
@@ -606,11 +625,13 @@ async function outputResults(outputMode, summary, totalAlerts, zeroAlertRepoCoun
  */
 async function main() {
   const outputMode = getOutputMode();
+  const repos = await resolveRepos();
+  logStatus(`Repo discovery complete: query="${REPO_SEARCH_QUERY}", matched repos=${repos.length}`);
 
-  logStatus(`Processing ${REPOS.length} repos (concurrency=${CONCURRENCY})...\n`);
+  logStatus(`Processing ${repos.length} repos (concurrency=${CONCURRENCY})...\n`);
 
   const results = await Promise.all(
-    REPOS.map(repo =>
+    repos.map(repo =>
       limit(async () => {
         logStatus(`Fetching ${repo}...`);
         const alerts = await fetchRepoAlerts(repo);
@@ -624,7 +645,7 @@ async function main() {
 
   logStatus(`\nTotal open alerts fetched: ${allAlerts.length}`);
 
-  const aggregated = aggregate(allAlerts, REPOS);
+  const aggregated = aggregate(allAlerts, repos);
   const duplicateStats = buildDuplicateStats(allAlerts);
 
   /**

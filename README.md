@@ -6,7 +6,8 @@ Fetch and summarize open Dependabot alerts across multiple GitHub repositories, 
 
 ## Features
 
-- Fetches open Dependabot alerts for a configurable list of GitHub repos
+- Fetches open Dependabot alerts for repos discovered via GitHub Search (`org/topic` query) - using topic `hof-dep-scanner`
+- Supports merging in a small static repo list for guaranteed inclusion
 - Aggregates and scores alert severities per repo
 - Output modes:
   - Console summary table
@@ -15,6 +16,14 @@ Fetch and summarize open Dependabot alerts across multiple GitHub repositories, 
 - Reports all repos, including those with zero alerts (clean repos)
 - Slack output lists clean repo names for easy visibility
 - Slack output includes severity mix with both counts and percentages (e.g. `24 critical (2%), 408 high (40%)`)
+- Slack output includes duplicate-vulnerability insight across repos (unique issues, duplicate alerts, cross-repo repeats)
+- Slack output includes top repeated issues grouped by CVE/GHSA with:
+  - Identifier
+  - Alert and repo counts
+  - Summary
+  - Reference URL (NIST CVE page, or GitHub advisory fallback)
+  - Affected package and vulnerable range
+  - First patched version (when available)
 - Only the four GitHub-supported severities are shown: critical, high, medium, low
 - Concurrency-limited for efficient API usage
 - GitHub Actions workflow for scheduled and manual CI runs
@@ -22,13 +31,24 @@ Fetch and summarize open Dependabot alerts across multiple GitHub repositories, 
 ## Requirements
 
 - Node.js 18+ (or 20+/24+ for native fetch)
-- A GitHub personal access token with `security_events:read` scope (set as `GITHUB_TOKEN` env var)
+- A GitHub personal access token with access to:
+  - Dependabot alerts (`security_events:read`)
+  - Repository search/read for the target org repos
 - (Optional) Slack webhook URL for direct posting
 
 ## Configuration
 
-Edit `index.js` to set your list of repos in the `REPOS` array.
-Set your GitHub token as an environment variable: `export GITHUB_TOKEN=...`
+Set the following environment variables:
+
+- `GITHUB_TOKEN` (required): token used for GitHub API calls
+- `REPO_SEARCH_QUERY` (optional): defaults to `org:UKHomeOffice topic:hof-dep-scanner`
+- `SLACK_WEBHOOK_URL` (required only for `--output=slack-post`)
+
+Repo discovery behavior:
+
+- Repos are fetched from GitHub Search using `REPO_SEARCH_QUERY`
+- A static list is merged in to guarantee inclusion of specific repos
+- Duplicate repo names are de-duplicated automatically
 
 ## Usage
 
@@ -41,6 +61,14 @@ Set your GitHub token as an environment variable: `export GITHUB_TOKEN=...`
    Or use Node.js 18+ with built-in fetch support.
 
 2. **Run the script**
+   - With default repo search query:
+     ```sh
+     GITHUB_TOKEN=... node index.js --output=console
+     ```
+   - With custom repo search query:
+     ```sh
+     GITHUB_TOKEN=... REPO_SEARCH_QUERY='org:UKHomeOffice topic:hof-dep-scanner' node index.js --output=slack-json
+     ```
    - Console summary:
      ```sh
      node index.js --output=console
@@ -86,7 +114,7 @@ jobs:
 
 **Required secrets:**
 - `SLACK_WEBHOOK_URL`: Your Slack incoming webhook URL
-- `DEPENDABOT_PAT`: A GitHub personal access token with `security_events:read` scope
+- `DEPENDABOT_PAT`: A GitHub personal access token with permissions to read Dependabot alerts and search/read target repos
 
 **Manual run:**
 - Go to the Actions tab, select the workflow, and click "Run workflow".
@@ -106,3 +134,14 @@ jobs:
   > Severity mix: 24 critical (2%), 408 high (40%), 434 medium (43%), 154 low (15%)
 
 - Only the four GitHub-supported severities are included (critical, high, medium, low)
+- Duplicate insight section includes:
+  - Unique issues count
+  - Duplicate alerts count
+  - Cross-repo repeated issues count
+- Top repeated issues include:
+  - CVE/GHSA identifier
+  - `X alerts across Y repos`
+  - Summary
+  - Reference URL (NIST preferred, GitHub advisory fallback)
+  - Affected package and vulnerable range
+  - First patched version when available
